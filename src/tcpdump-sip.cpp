@@ -18,6 +18,8 @@ int main() {
 	std::ifstream input("/home/lochnerr/reasnor-sip1.txt");
 	std::string line;
 
+	processor.self_tests();
+
 	// Read and process the data.
 	// See: https://unix.stackexchange.com/questions/25372/turn-off-buffering-in-pipe
 	while (std::getline(input, line))

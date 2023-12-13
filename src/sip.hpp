@@ -30,6 +30,12 @@ enum Event {
 	Unexpected
 };
 
+// Utility functions.
+
+Event getEvent(std::string line);
+std::string get_number(std::string value);
+std::string padID(std::string id);
+
 class sip {
 public:
 	sip() = default;
@@ -37,15 +43,16 @@ public:
 	void flush();
 	void process(const std::string line);
 	void process_tcp_1(std::string line);
-	void process_tcp_2(std::string line);
-	void process_call();
+	void process_call_id();
+	void process_headers();
 	void process_header(std::string line);
-	void process_content(std::string line);
 	void process_event(std::string line);
 	void finish();
 	Call *getCall(std::string id);
+	void self_tests();
 private:
 	run_stats s;
+	int block=0;
 	int block_seq=0;
 	std::map<std::string, Call *> calls;
 	Call *current_call = NULL;
@@ -57,8 +64,9 @@ private:
 	std::string id;
 	std::string from;
 	std::string to;
-	int content_length = -1;
-	bool already_flushed = false;
+	std::string cause;
+	std::string content_length;
+	bool headers_processed = false;
 };
 
 #endif /* SIP_HPP_ */

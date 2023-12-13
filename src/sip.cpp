@@ -27,6 +27,9 @@ public:
 public:
 	int index = 0;
 	CState state = Unknown;
+	std::string sip_info;
+	std::string start_timestamp;
+	std::string clearing;
 };
 // -----------------------------------------------------------------------
 
@@ -39,18 +42,7 @@ sip::~sip()
 	s.print();
 }
 
-Call *sip::getCall(std::string call_id)
-{
-
-	//auto it = calls.find(call_id);
-	if (calls.find(call_id) == calls.end()) {
-		calls[call_id] = new Call();
-		s.calls++;
-	}
-	return calls[call_id];
-}
-
-static Event getEvent(std::string line)
+Event getEvent(std::string line)
 {
 
 	if (line.length() > 8 &&
@@ -81,9 +73,6 @@ static Event getEvent(std::string line)
 void sip::flush()
 {
 
-	if (already_flushed)
-		return;
-
 	if (!id.empty() && 1 == 2) {
 		std::cout
 			<< s.lines
@@ -102,29 +91,23 @@ void sip::flush()
 	id.clear();
 	from.clear();
 	to.clear();
-	content_length = -1;
+	content_length.clear();
 	if (block_seq <= 4) {
 		;  // TODO This should be counted or something
 	}
 	block_seq = 1;
-	already_flushed = true;
+	headers_processed = false;
 }
 
 void sip::process_tcp_1(std::string line)
 {
+	block++;
 	flush();
-	already_flushed = false;
 	s.tcp1++;
 	tcp_data1 = line;
 }
 
-void sip::process_tcp_2(std::string line)
-{
-	s.tcp2++;
-	tcp_data2 = line;
-}
-
-static std::string get_number(std::string value)
+std::string get_number(std::string value)
 {
 	auto start = value.find_first_of(':');
 	if (start == std::string::npos)
@@ -150,9 +133,22 @@ static std::string get_number(std::string value)
 	return value.substr(start+1,end-(start+1));
 }
 
-void sip::process_call()
+void sip::process_call_id()
 {
-	Call *call = getCall(id);
+	// Find existing record for call_id or create new one.
+	if (calls.find(id) == calls.end()) {
+		// TODO This is the first time this id has been encountered.
+		// Normally, this would be an INVITE.
+		calls[id] = new Call();
+		calls[id]->start_timestamp = tcp_data1.substr(0,8);
+		calls[id]->sip_info = sip_info;
+		s.calls++;
+		if (sip_info.substr(0,6) == "INVITE") {
+			std::cout << padID(id) << tcp_data1.substr(0,15) <<
+					" call to " << to << " from " << from << std::endl;
+		}
+	}
+	auto call = calls[id];
 
 	auto cmd = sip_info.substr(0,3);
 
@@ -173,6 +169,7 @@ void sip::process_call()
 	if (call->state == Waiting_For_SIP && cmd == "SIP") {
 		s.disconnects++;
 		call->state = Disconnected;
+		call->clearing = "Completed";
 	}
 
 	if (call->state != Disconnected) {
@@ -180,9 +177,48 @@ void sip::process_call()
 			// Is this a failure response?
 			if (sip_info[8] > '3') {
 				call->state = Waiting_For_ACK;
+				call->clearing = "Failed";
 			}
 		}
 	}
+}
+
+std::string padID(std::string id) {
+	auto rv = id;
+	if (rv.length() < 60)
+		rv.append(60-rv.length(), ' ');
+	return rv;
+}
+
+void sip::process_headers()
+{
+	if (headers_processed)
+		return;
+
+	headers_processed = true;
+
+	// Ideally, I'd like to see something like:
+	// call-id hh:mm:ss call to nnn/xxx-xxxx from npa/nxxxxxx
+	// call-id hh:mm:ss call to nnn/xxx-xxxx from npa/nxxxxxx answered
+	// call-id hh:mm:ss call to nnn/xxx-xxxx from npa/nxxxxxx disonnects cause=16
+
+	auto call = calls[id];
+
+	if (call->state != Disconnected) {
+		return;
+	}
+
+	std::cout << padID(id) << tcp_data1.substr(0,15) <<
+			" call to " << to << " from " << from <<
+			" disconnected cause=" << cause <<
+			std::endl;
+
+	if (1 == 2)
+		std::cout << call->start_timestamp << " : " << call->sip_info << " " << id << std::endl
+				<< tcp_data1.substr(0,8) << " : " << sip_info
+				<< " " << call->clearing << " cause: " << cause << " " << id << std::endl;
+
+	cause.clear();
 }
 
 void sip::process_header(const std::string line)
@@ -194,14 +230,17 @@ void sip::process_header(const std::string line)
 		return;
 	}
 
-	// If this is a blank line and the content_length has been set to 0, the data is
-	// ready to be processed, so go ahead and do it now, rather than waiting for a
-	// subsequent call to trigger the processing.  This allows the program to process
-	// call events more quickly.
-	if (content_length == 0 && getEvent(line) == Blank) {
-		flush();
+	// If this is a blank line that follows after a content_length header with a value of 0,
+	// the headers are ready to be processed.  Do it immediately, rather than waiting for a
+	// subsequent call event to trigger the processing.  This allows the program to trigger
+	// on call events more quickly (answers, disconnects and failures primarily).
+	if (content_length == "0") {
+		process_headers();
 		return;
 	}
+
+	if (getEvent(line) == Blank)
+		return;
 
 	// TODO Do the normal header thing...
 	// Get the header type.
@@ -209,6 +248,7 @@ void sip::process_header(const std::string line)
 	if (index == std::string::npos) {
 		s.funky++;
 		if (s.funky < 20) {
+			std::cout << "Content-length: " << content_length << std::endl;
 			std::cout << "funky *** " << s.lines << " = " << line << " ***" << std::endl;
 		}
 		return;
@@ -226,29 +266,31 @@ void sip::process_header(const std::string line)
 
 	if (type == "Call-ID") {
 		id = value;
-		process_call();
+		process_call_id();
 	} else if (type == "From") {
 		from = get_number(value);
 	} else if (type == "To") {
 		to = get_number(value);
-		if (sip_info.substr(0,6) == "INVITE" && to.substr(0,6) == "641793") {
-			std::cerr << "INVITE for " << to << std::endl;
-		}
+	} else if (type == "Reason") {
+		auto start = value.find_first_of('=');
+		if (start != std::string::npos)
+			cause = value.substr(start+1);
+	} else if (type == "X-WV-HangupCauseCode") {
+		cause = value;
 	} else if (type == "Content-Length") {
-		if (value.length() > 0 && value[0] == '0') {
-			content_length = 0;
-		}
+		content_length = value;
+		if (value.length() < 1)
+			content_length = "0";
 	}
 }
 
-void sip::process_content(std::string line)
+static void process_content(string content, int lines, const std::string line)
 {
-	s.content++;
-	// Ignore content for now.
+
 	if (line.length() < 2) {
-		cout << "Empty content at line " << s.lines << " ???" << std::endl;
-		return;
+		throw std::invalid_argument("Empty content at line " + line + ".");
 	}
+
 	if (content.length()>0)
 		content.append('|',1);
 
@@ -317,10 +359,13 @@ void sip::process_event(std::string line)
 
 	block_seq++;
 
+	std::string row_type = "nil";
+
 	switch(state) {
 	case Nil:
 		switch(event) {
 		case TCPInd:
+			row_type = "tc1";
 			process_tcp_1(line);
 			state=TCP;
 			break;
@@ -332,11 +377,14 @@ void sip::process_event(std::string line)
 	case TCP:
 		switch(event) {
 		case TCPInd:
+			row_type = "tc1";
 			process_tcp_1(line);
 			state=TCP;
 			break;
 		case Space:
-			process_tcp_2(line);
+			row_type = "tc2";
+			s.tcp2++;
+			tcp_data2 = line.substr(4);
 			state=Headers;
 			break;
 		default:
@@ -347,12 +395,20 @@ void sip::process_event(std::string line)
 	case Headers:
 		switch(event) {
 		case TCPInd:
+			row_type = "tc1";
 			process_tcp_1(line);
 			state=TCP;
 			break;
 		case TabData:
-		case Blank:
+			row_type = "hdr";
+			if (block_seq == 3)
+				row_type = "sip";
 			process_header(line);
+			break;
+		case Blank:
+			row_type = "hdr";
+			process_header(line);
+			state=Content;
 			break;
 		default:
 			state=Nil;
@@ -362,11 +418,14 @@ void sip::process_event(std::string line)
 	case Content:
 		switch(event) {
 		case TCPInd:
+			row_type = "tc1";
 			process_tcp_1(line);
 			state=TCP;
 			break;
 		case TabData:
-			process_content(line);
+			row_type = "cnt";
+			s.content++;
+			process_content(content, s.lines, line);
 			break;
 		default:
 			state=Nil;
@@ -376,6 +435,11 @@ void sip::process_event(std::string line)
 	default:
 		break;
 	}
+
+	if (1 == 2)
+	// lines:block:block_seq:row_type:data
+	std::cout << s.lines << ":" << block << ":" << block_seq	<< ":"
+		<< row_type << ": " << line << std::endl;
 
 	return;
 }
