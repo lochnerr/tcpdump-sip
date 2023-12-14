@@ -12,6 +12,7 @@
 
 #include <string>
 #include <map>			// std::map
+#include <vector>		// std::vector
 
 class Call;
 
@@ -65,8 +66,10 @@ private:
 	std::string from;
 	std::string to;
 	std::string cause;
+	std::string sip_cause;
 	std::string content_length;
 	bool headers_processed = false;
+	std::vector<std::string> headers;
 };
 
 #endif /* SIP_HPP_ */

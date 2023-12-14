@@ -92,6 +92,8 @@ void sip::flush()
 	from.clear();
 	to.clear();
 	content_length.clear();
+	//cause.clear();
+	//sip_cause.clear();
 	if (block_seq <= 4) {
 		;  // TODO This should be counted or something
 	}
@@ -152,6 +154,19 @@ void sip::process_call_id()
 
 	auto cmd = sip_info.substr(0,3);
 
+	// *****************************
+	// Get the status info as best as possible
+	if (sip_info.substr(0,8) == "SIP/2.0 " && isdigit(sip_info[8]) && isdigit(sip_info[9]) && isdigit(sip_info[10])) {
+		if (sip_info[8] == '1') {
+			; // Don't care about trying/progress packets.
+		} else if (sip_info.substr(8,6) == "200 OK") {
+			; // Don't care about normal acknowledgement packets.
+		} else {
+			sip_cause = sip_info.substr(8);
+		}
+	}
+	// *****************************
+
 	// BYE can come at any time.
 	if (cmd == "BYE") {
 		call->state = Waiting_For_SIP;
@@ -197,20 +212,71 @@ void sip::process_headers()
 
 	headers_processed = true;
 
+	// Get all of the values from the header list that are of interest.
+	for (auto line : headers) {
+		// Get the header type.
+		auto index = line.find_first_of(':');
+		if (index == std::string::npos) {
+			s.funky++;
+			if (s.funky < 20) {
+				std::cout << "funky *** " << s.lines << " = " << line << " ***" << std::endl;
+			}
+			continue;
+		}
+
+		// The type starts after the leading tab character and continues to the colon.
+		//auto type=line.substr(1,index-1);
+		auto type=line.substr(0,index);
+
+		// Strip the value. If there is a value, the line will contain the type name, a colon, a
+		// space and, at least, one more character.  Hence, line must be longer than the type
+		// length plus 3.
+		std::string value;
+		if (line.length() >= type.length()+3)
+			value = line.substr(index+2);
+
+		if (type == "Call-ID") {
+			id = value;
+		} else if (type == "From") {
+			from = get_number(value);
+		} else if (type == "To") {
+			to = get_number(value);
+		} else if (type == "Reason") {
+			auto start = value.find_first_of('=');
+			if (start != std::string::npos)
+				cause = value.substr(start+1);
+		} else if (type == "X-WV-HangupCauseCode") {
+			cause = value;
+		} else if (type == "Content-Length") {
+			content_length = value;
+			if (value.length() < 1)
+				content_length = "0";
+		}
+	}
+
+	// Done with these headers.
+	headers.clear();
+
+	if (id.empty()) {
+		return;
+	}
+
 	// Ideally, I'd like to see something like:
 	// call-id hh:mm:ss call to nnn/xxx-xxxx from npa/nxxxxxx
 	// call-id hh:mm:ss call to nnn/xxx-xxxx from npa/nxxxxxx answered
 	// call-id hh:mm:ss call to nnn/xxx-xxxx from npa/nxxxxxx disonnects cause=16
 
+	process_call_id();
 	auto call = calls[id];
 
 	if (call->state != Disconnected) {
 		return;
 	}
 
+	if (cause.empty()) cause="?";
 	std::cout << padID(id) << tcp_data1.substr(0,15) <<
 			" call to " << to << " from " << from <<
-			" disconnected cause=" << cause <<
+			" disconnected cause=" << cause << " " << sip_cause <<
 			std::endl;
 
 	if (1 == 2)
@@ -219,11 +285,17 @@ void sip::process_headers()
 				<< " " << call->clearing << " cause: " << cause << " " << id << std::endl;
 
 	cause.clear();
+	sip_cause.clear();
+
 }
 
 void sip::process_header(const std::string line)
 {
 	s.header++;
+
+	if (line[0] != '\t')
+		throw std::invalid_argument("Header does not start with tab " + line + ".");
+
 	// If this is the third line of a block, it is the SIP request or result value.
 	if (block_seq == 3) {
 		sip_info = line.substr(1);
@@ -234,54 +306,12 @@ void sip::process_header(const std::string line)
 	// the headers are ready to be processed.  Do it immediately, rather than waiting for a
 	// subsequent call event to trigger the processing.  This allows the program to trigger
 	// on call events more quickly (answers, disconnects and failures primarily).
-	if (content_length == "0") {
+	if (line.length() == 1 /* tab only */) {
 		process_headers();
 		return;
 	}
 
-	if (getEvent(line) == Blank)
-		return;
-
-	// TODO Do the normal header thing...
-	// Get the header type.
-	auto index = line.find_first_of(':');
-	if (index == std::string::npos) {
-		s.funky++;
-		if (s.funky < 20) {
-			std::cout << "Content-length: " << content_length << std::endl;
-			std::cout << "funky *** " << s.lines << " = " << line << " ***" << std::endl;
-		}
-		return;
-	}
-
-	// The type starts after the leading tab character and continues to the colon.
-	auto type=line.substr(1,index-1);
-
-	// Strip the value. If there is a value, the line will contain the type name, a colon, a
-	// space and, at least, one more character.  Hence, line must be longer than the type
-	// length plus 3.
-	std::string value;
-	if (line.length() >= type.length()+3)
-		value = line.substr(index+2);
-
-	if (type == "Call-ID") {
-		id = value;
-		process_call_id();
-	} else if (type == "From") {
-		from = get_number(value);
-	} else if (type == "To") {
-		to = get_number(value);
-	} else if (type == "Reason") {
-		auto start = value.find_first_of('=');
-		if (start != std::string::npos)
-			cause = value.substr(start+1);
-	} else if (type == "X-WV-HangupCauseCode") {
-		cause = value;
-	} else if (type == "Content-Length") {
-		content_length = value;
-		if (value.length() < 1)
-			content_length = "0";
-	}
+	headers.push_back(line.substr(1));
 }
 
 static void process_content(string content, int lines, const std::string line)

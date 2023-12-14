@@ -15,7 +15,7 @@
 sip processor;
 
 int main() {
-	std::ifstream input("/home/lochnerr/reasnor-sip1.txt");
+	std::ifstream input("/home/lochnerr/reasnor-sip3.txt");
 	std::string line;
 
 	processor.self_tests();
